@@ -295,8 +295,8 @@ def get_idx_bANDe(ij):
         return None,None,None,nbre_skip
         #continue
     else:
-        idxb = max([idxb1,idxb2 ])
-        #idxb = idxb1
+        #idxb = max([idxb1,idxb2 ])
+        idxb = idxb1
 
 
 
