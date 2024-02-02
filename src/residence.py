@@ -13,6 +13,7 @@ import socket
 import datetime 
 import glob 
 import multiprocessing
+import warnings 
 
 #homebrewed
 sys.path.append('../../GeorefIRCam/src/')
@@ -20,6 +21,12 @@ import tools
 import spectralTools
 import interpSplineBT
 
+'''
+search for arrival time (time_b) and end of flaming (time_e)
+time_b is either the arrival time from segNablaT or if idx==0, then we use the first inflexion point before the max of the smoothed bt time series
+time_e is the first inflexion point after bot max bt and max smooth bt are passed and spline interpolated bt_ is lower than 850
+residence time is then time_e-time_b
+'''
 
 ################################################
 def string_2_bool(string):
@@ -109,19 +116,22 @@ def get_idx_bANDe(ij):
         if (ij[0] not in ijc[0]) | (ij[1] not in ijc[1]):
             return None,None,None,nbre_skip
 
-    flag_plot = False
-
+    if flag_TestMissingPt_only == True:
+        flag_plot = True
+    else: 
+        flag_plot = False
+    
     temp_1d  = temp_data[ :,ij[0],ij[1]]
 
     if temp_1d.max() < minbtTest:
-        nbre_skip += 1
-        return None,None,None,nbre_skip
-        #continue 
+        return arrivaltime[ij[0],ij[1]],0,0,nbre_skip
+    
+    if temp_1d.max() < maxbtTest:
+        return arrivaltime[ij[0],ij[1]], 0, 0, nbre_skip
 
     if (np.std(np.sort(temp_1d)[-3:]) > 100) : 
         nbre_skip += 1
         return None,None,None,nbre_skip
-        #continue 
 
     if np.sort(temp_1d)[-3:].min() < minbtTest: 
         nbre_skip += 1
@@ -153,27 +163,62 @@ def get_idx_bANDe(ij):
     while( time_[-1]-time_[-2]>5) :  
         time_ = time_[:-1]; bt_ = bt_[:-1]
     
-    
     if bt_.shape[0] < 30: 
-        if flag_plot: pdb.set_trace()
+        #if flag_plot: pdb.set_trace()
         nbre_skip += 1
-        return None,None,None,nbre_skip
+        return -888,-888,-888,nbre_skip # set for interpolation afterards
         #continue
     
-    #keep the first chunck after the first big gap
+    #check if we have smoldering picking up, in this case we keep only the first chunck above maxbtTest
+    idx_tmp = np.where(bt_ > maxbtTest)
+    if len(idx_tmp[0])> 1: 
+        Diff_Time_hT = np.diff(time_[idx_tmp])
+        if Diff_Time_hT.max() > 100: 
+            idx_ = idx_tmp[0][np.where(Diff_Time_hT>100)[0].min()+1]
+            time_ = time_[:idx_]
+            bt_   = bt_[:idx_]
+    
+    
+    #keep the  chunck with the max bt
     if (time_[1:]-time_[:-1]).max() > 10: 
         ii = 0
-        while True :  
-            if (time_[ii+1] - time_[ii]) > 10: break
+        difftime = time_[1:]-time_[:-1]
+        arr_ = [[]]
+        for ii in range(len(time_)-1):
+            arr_[-1].append(ii)
+            if ((time_[ii+1] - time_[ii]) > 10):
+                arr_.append([])
             ii += 1
-        time_ = time_[:ii]; bt_ = bt_[:ii]
-    
+        btmax = bt_.max()
+        flag_max_notFound = True
+        for iarr_, arr__  in enumerate(arr_): 
+            if len(arr__)==0: break
+            if bt_[(arr__,)].max() == bt_.max(): 
+                    time_ = time_[(arr__,)]
+                    bt_   = bt_[(arr__,)]
+                    flag_max_notFound = False
+                    break
+
+        if flag_max_notFound: 
+            #if flag_plot: pdb.set_trace()
+            nbre_skip += 1
+            return -888,-888,-888,nbre_skip   
 
     if bt_.shape[0] < 30: 
+        #if flag_plot: pdb.set_trace()
+        nbre_skip += 1
+        return -888,-888,-888,nbre_skip
+        #continue
+    
+
+    #remove timeseries with not enough point
+    #-------------
+    if bt_ is None: 
         if flag_plot: pdb.set_trace()
         nbre_skip += 1
         return None,None,None,nbre_skip
         #continue
+    
     
     if (time_[1:]-time_[:-1]).max() > 10:
         if flag_plot: pdb.set_trace()
@@ -182,26 +227,30 @@ def get_idx_bANDe(ij):
         #continue
     
     if bt_.max() < maxbtTest: 
-        if flag_plot: pdb.set_trace()
-        nbre_skip += 1
-        return None,None,None,nbre_skip
+        #if flag_plot: pdb.set_trace()
+        #nbre_skip += 1
+        return arrivaltime[ij[0],ij[1]], 0, 0 ,nbre_skip
         #continue
+    
 
     ssarr_test = []
     resiarr = []
     ss_selection = np.logspace(1,5)
-    
     for iss, ss in enumerate(ss_selection): 
     #for ss in [1.e5]:
         # interpolate timeseries
         #--------
         bt_smooth  = savgol_filter(bt_, 21, 3)
-        spl_ = interpolate.UnivariateSpline(time_, bt_smooth, ext=3, )
-        #spl_.set_smoothing_factor(4.e4)
-        spl_.set_smoothing_factor(ss)
-        bt_deriv = spl_.derivative()(time_)
-        bt_2ndderiv = spl_.derivative(n=2)(time_)
-   
+        with warnings.catch_warnings(record=True) as w:
+            spl_ = interpolate.UnivariateSpline(time_, bt_smooth, ext=3, )
+            #spl_.set_smoothing_factor(4.e4)
+            spl_.set_smoothing_factor(ss)
+            bt_deriv = spl_.derivative()(time_)
+            bt_2ndderiv = spl_.derivative(n=2)(time_)
+            
+            if len(w)>0:
+                continue
+
         idx_test = np.where( (time_>=time_[bt_smooth.argmax()]-10) & (time_<=(time_[bt_smooth.argmax()]+10) ) )
         #if len(idx_test[0])==0: 
         #    pdb.set_trace()
@@ -221,36 +270,22 @@ def get_idx_bANDe(ij):
     bt_deriv = spl_.derivative()(time_)
     bt_2ndderiv = spl_.derivative(n=2)(time_)
 
-
-
     idx_arrivalT = bt_smooth.argmax() 
     
-    if idx_arrivalT < 3: 
-        if flag_plot: pdb.set_trace()
-        nbre_skip += 1
-        return None,None,None,nbre_skip
-        #continue
-
-    #bt_deriv_max = 0.95*bt_deriv.max()
-   
     #check if max derivative has high enough bt
     if (bt_smooth[idx_arrivalT] < maxbtTest) : 
-        #print('*')
+        return arrivaltime[ij[0],ij[1]], 0, 0 ,nbre_skip
+    
+    if idx_arrivalT < 3: 
         nbre_skip += 1
-        return None,None,None,nbre_skip
+        return -888,-888,ss,nbre_skip  # not enough pt in residence time
+
         #continue
 
-    
     #max bt is ok
     
     #arrival time from segmentation
-    idxb1 = np.abs(time_ - arrivaltime[ij[0],ij[1]] ).argmin()
    
-    if idxb1 > len(time_)-2: 
-        nbre_skip += 1
-        return None,None,None,nbre_skip
-        #continue
-
 
     '''
     #second arrival time 
@@ -279,11 +314,13 @@ def get_idx_bANDe(ij):
                 time_b = time_[np.where(spl_(time_)>maxbtTest)].min()
             except: 
                 time_b = None
-    if time_b == None:
-        nbre_skip += 1
-        return None,None,None,nbre_skip
+    
+    if time_b == None: # spl_(time_).max() < maxbtTest, no flaming
+        return arrivaltime[ij[0],ij[1]], 0, 0 ,nbre_skip
         #continue
-   
+  
+
+    idxb1 = np.abs(time_ - arrivaltime[ij[0],ij[1]] ).argmin()
     idxb2 = np.abs(time_- time_b).argmin()
     
     if   (time_[idxb1] >=  time_[idx_arrivalT]-1 ) & (time_[idxb2] < time_[idx_arrivalT]-1): 
@@ -292,29 +329,57 @@ def get_idx_bANDe(ij):
         idxb = idxb1
     elif (time_[idxb1] >=  time_[idx_arrivalT]-1) & (time_[idxb2] >=  time_[idx_arrivalT]-1):
         nbre_skip += 1
-        return None,None,None,nbre_skip
+        #if flag_plot: pdb.set_trace()
+        return -888,-888,ss,nbre_skip # set for interpolation afterwards, something fishy with idxb1 and idxb2
         #continue
     else:
-        #idxb = max([idxb1,idxb2 ])
-        idxb = idxb1
-
+        if idxb1>1: 
+            idxb = idxb1
+        else:
+            idxb = max([idxb1,idxb2 ])
 
 
     try:
         corr_2ndderivmin = 0 
-        time_e = time_[getIdxPass2Zeros(bt_2ndderiv+corr_2ndderivmin)][ np.where( (time_[getIdxPass2Zeros(bt_2ndderiv+corr_2ndderivmin)]>time_[spl_(time_).argmax()])  & 
-                                                                                  (time_[getIdxPass2Zeros(bt_2ndderiv+corr_2ndderivmin)]>time_[bt_smooth.argmax()])   )].min() #&
-                                                                           # (spl_(time_)[getIdxPass2Zeros(bt_2ndderiv+corr_2ndderivmin)]<800  ) )].min()
+        idx_2ndbtZeros = getIdxPass2Zeros(bt_2ndderiv+corr_2ndderivmin)
+        try: 
+            idx_2ndbtZeros_ok = np.where( (time_[idx_2ndbtZeros]>time_[spl_(time_).argmax()])     & 
+                                          (time_[idx_2ndbtZeros]>time_[np.where(bt_>.9*bt_.max())].max() ) & 
+                                          (time_[idx_2ndbtZeros]>time_[bt_smooth.argmax()])    )[0].min()
+        except: 
+            idx_2ndbtZeros_ok = np.where( (time_[idx_2ndbtZeros]>time_[spl_(time_).argmax()])     & (time_[idx_2ndbtZeros]>time_[bt_smooth.argmax()])    )[0].min() 
+        
+        time_e = time_[idx_2ndbtZeros][idx_2ndbtZeros_ok]
+        
+        #time_e = time_[getIdxPass2Zeros(bt_2ndderiv+corr_2ndderivmin)][ np.where( (time_[getIdxPass2Zeros(bt_2ndderiv+corr_2ndderivmin)]>time_[spl_(time_).argmax()])  & 
+        #                                                                          (time_[getIdxPass2Zeros(bt_2ndderiv+corr_2ndderivmin)]>time_[bt_smooth.argmax()])   )].min() 
+
+
         idxe = np.abs(time_-time_e).argmin()
+        if spl_(time_)[idxe] > 850: 
+            try:
+                idx_2ndbtZeros = getIdxPass2Zeros(bt_2ndderiv+corr_2ndderivmin)
+                idx_2ndbtZeros_ok = np.where( (time_[idx_2ndbtZeros]>time_[spl_(time_).argmax()])  & 
+                                              (time_[idx_2ndbtZeros]>time_[bt_smooth.argmax()])    &
+                                        (spl_(time_)[idx_2ndbtZeros]<850  )                        )[0].min()
+                time_e = time_[idx_2ndbtZeros][idx_2ndbtZeros_ok]
+                idxe = np.abs(time_-time_e).argmin()
+            except: 
+                pass
+
         idx_peak = find_peaks(bt_2ndderiv[idx_arrivalT:idxe])[0]
         if len(idx_peak)>0:
+            idxe_ = idxe
             for idx__ in idx_peak:
                 idxe__ = idx_arrivalT+idx__
-                #if  spl_(time_)[idxe__] > 800: 
-                #    continue
-                #else: 
-                idxe_ = idxe__
-                break
+                if  spl_(time_)[idxe__] > 850: 
+                    continue
+                elif time_[idxe__] < time_[np.where(bt_>.9*bt_.max())].max(): 
+                    continue
+                else: 
+                    idxe_ = idxe__
+                    break
+
             resi_ = time_[idxe_] - time_[idxb]
             if resi_ > 5.:     #only change idxe if residence time is > than 5s
                 idxe = idxe_
@@ -324,12 +389,22 @@ def get_idx_bANDe(ij):
     except: 
         time_e = None
 
+    if (time_e == None) & (spl_(time_).max()<650):
+        return time_b,0,ss,nbre_skip
+
     if time_e == None:
         nbre_skip += 1
-        return None,None,None,nbre_skip
-        #continue
+        #if flag_plot: pdb.set_trace()
+        return -888,-888,ss,nbre_skip
+    
     idxe = np.abs(time_- time_e).argmin()
     
+    if bt_.max() > maxbtTest_hightT: 
+        ratio_highT_inResidenceTime = np.where((bt_>maxbtTest_hightT) & (time_<time_e) & (time_>time_b))[0].shape[0]/np.where(bt_>maxbtTest_hightT)[0].shape[0]
+        if ratio_highT_inResidenceTime < 0.2:
+            nbre_skip += 1
+            return -888,-888,ss,nbre_skip  # not enough pt in residence time
+
     if ijc != None:
         if (ij[0] in ijc[0]) & (ij[1] in ijc[1]): 
            flag_plot = True
@@ -411,6 +486,8 @@ if __name__ == '__main__':
         flag_parallel = False
     else: 
         flag_parallel = string_2_bool( args.parallel )
+
+    flag_TestMissingPt_only = False
 
     inputConfig = importlib.machinery.SourceFileLoader('config_'+runName,os.getcwd()+'/../../GeorefIRCam/input_config/config_'+runName+'.py').load_module()
     
@@ -675,22 +752,28 @@ if __name__ == '__main__':
         if mode == 'lwir': 
             minbtTest = 340
             maxbtTest = 400
-            maxbtTest2 = 500
+            maxbtTest_hightT = 500
             minbtOK = 290 
         elif mode == 'mwir': 
             minbtTest = 550
             maxbtTest = 600
-            maxbtTest2 = 600 
+            maxbtTest_hightT = 650 
             minbtOK = 475
+
+        #for Testing pt that were not set in previous run 
+        if flag_TestMissingPt_only == True:
+            resi = np.load('{:s}/resi.npy'.format(dir_out))
+            resi = resi.view(np.recarray)
 
         N = np.where(grid.mask==2)[0].shape[0]/step
         args_here = []
         for iii, ij in enumerate(list(zip(*np.where(grid.mask==2)))[::step]):
-            args_here.append([ij])
+            if resi.resi[ij[0],ij[1]]<0: 
+                args_here.append([ij])
 
         #flag_parallel = False
         if flag_parallel: 
-            cpus= 20 
+            cpus= 22 
             pool = multiprocessing.Pool(processes=cpus)
 
             # then the map method of pool actually does the parallelisation  
